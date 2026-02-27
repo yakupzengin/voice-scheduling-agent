@@ -1,0 +1,18 @@
+# Railway deployment configuration
+# Docs: https://docs.railway.app/reference/config-as-code
+
+[build]
+  builder = "DOCKERFILE"
+
+[deploy]
+  startCommand = "node dist/index.js"
+  healthcheckPath = "/health"
+  healthcheckTimeout = 10
+  restartPolicyType = "ON_FAILURE"
+  restartPolicyMaxRetries = 3
+
+# NOTE: Volumes cannot be configured via railway.toml.
+# You MUST create the volume manually in the Railway dashboard:
+#   Railway project -> your service -> Volumes -> Add Volume -> Mount path: /data
+# Then set the environment variable:  DB_PATH=/data/tokens.db
+# Failure to do this means tokens.db is lost on every redeploy.

@@ -19,15 +19,15 @@ graph TB
         META["metadata: { sessionId, timezone }"]
     end
     subgraph Backend["Node.js Backend (Railway)"]
-        MW[requestLogger\nattach requestId]
+        MW["requestLogger - attach requestId"]
         RL[Rate limiter]
-        AR[/auth/google/start+callback]
-        SR[/session/:sessionId\nserve HTML + inject metadata]
-        CR[POST /api/create-event\nZod validation + luxon RFC3339]
-        GAS[googleAuth.ts\nOAuth2 + token rotation]
-        CS[calendarService.ts\ncalendar.events.insert]
-        DB[(SQLite\nsessionId → refreshToken)]
-        LOG[Pino structured logs\nredact: tokens, secrets]
+        AR["/auth/google/start + callback"]
+        SR["/session/:sessionId - serve HTML + metadata"]
+        CR["POST /api/create-event - Zod + luxon RFC3339"]
+        GAS["googleAuth.ts - OAuth2 + token rotation"]
+        CS["calendarService.ts - calendar.events.insert"]
+        DB[("SQLite - sessionId to refreshToken")]
+        LOG["Pino structured logs - redact tokens"]
     end
     subgraph Google["Google Cloud"]
         GAUTH[OAuth2]
@@ -49,7 +49,7 @@ graph TB
     CR --> GAS --> DB
     GAS --> CS
     CS -->|events.insert + IANA timezone| GCAL
-    GCAL -->|eventId, htmlLink| CS
+    GCAL -->|eventId + htmlLink| CS
     CS --> CR
     CR -->|JSON| TOOL
 ```

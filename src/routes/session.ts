@@ -122,7 +122,7 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
         const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
         await vapi.start({
-          assistant: ASSISTANT_ID,
+          assistantId: ASSISTANT_ID,
           metadata: {
             sessionId: SESSION_ID,
             timezone:  browserTimezone,

@@ -89,7 +89,7 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
     so the event listener is wired inside the module rather than via onclick.
   -->
   <script type="module">
-    import Vapi from "https://esm.sh/@vapi-ai/web";
+    import Vapi from "https://esm.sh/@vapi-ai/web@2.5.2";
 
     // Server-injected values
     const PUBLIC_KEY   = "${safePublicKey}";
@@ -111,7 +111,8 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
     vapi.on('error', (e) => {
       status.textContent = 'Connection error. Please refresh and try again.';
       btn.disabled = false;
-      console.error('Vapi error:', e);
+      // Stringify fully so the validation-error detail is visible in console
+      console.error('[vapi] error event:', JSON.stringify(e, Object.getOwnPropertyNames(e)));
     });
 
     btn.addEventListener('click', async () => {
@@ -119,8 +120,13 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
       status.textContent = 'Connecting\u2026';
 
       try {
+        // Debug: confirm values are injected correctly (safe — key is truncated)
+        console.log('[vapi] pubKey prefix:', PUBLIC_KEY.slice(0, 8), '| assistantId:', ASSISTANT_ID);
+
         await vapi.start(ASSISTANT_ID);
       } catch (e) {
+        // Log the full error so the browser console shows the real cause
+        console.error('[vapi] start() threw:', JSON.stringify(e, Object.getOwnPropertyNames(e)));
         status.textContent = 'Failed to start voice call. Please refresh and try again.';
         btn.disabled = false;
         console.error('Vapi init error:', e);

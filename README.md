@@ -156,8 +156,8 @@ Returns `404` if sessionId not found in DB (with link to re-authenticate).
 {
   "sessionId":    "uuid-v4",
   "name":         "John Smith",
-  "date":         "2026-03-15",
-  "time":         "14:30",
+  "date":         "March 15, 2026",
+  "time":         "3 PM",
   "timezone":     "America/New_York",
   "durationMins": 30,
   "title":        "Project sync"
@@ -168,8 +168,8 @@ Returns `404` if sessionId not found in DB (with link to re-authenticate).
 |---|---|---|---|
 | `sessionId` | UUID string | Yes | From OAuth session |
 | `name` | string | Yes | Attendee name (max 100 chars) |
-| `date` | string | Yes | `YYYY-MM-DD` — local date in given timezone |
-| `time` | string | Yes | `HH:mm` 24h — local time in given timezone |
+| `date` | string | Yes | Any human-readable date — e.g. `"2026-03-15"`, `"15/03/2026"`, `"March 15, 2026"` |
+| `time` | string | Yes | Any human-readable time — e.g. `"14:30"`, `"2:30 PM"`, `"3 PM"` |
 | `timezone` | string | Yes | IANA e.g. `"America/New_York"` |
 | `durationMins` | integer | Yes | 5–240 minutes (default 30 if omitted from Vapi) |
 | `title` | string | No | Defaults to `"Meeting with {name}"` |

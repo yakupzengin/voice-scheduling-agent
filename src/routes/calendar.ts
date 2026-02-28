@@ -1,11 +1,80 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { DateTime, IANAZone } from 'luxon';
+import { IANAZone } from 'luxon';
+import dayjs from 'dayjs';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
+import utc from 'dayjs/plugin/utc';
+import dayjsTimezone from 'dayjs/plugin/timezone';
 import { hashSessionId } from '../utils/logger';
 import { createCalendarEvent } from '../services/calendarService';
 import { GoogleApiError } from '../services/googleAuth';
 
+dayjs.extend(customParseFormat);
+dayjs.extend(utc);
+dayjs.extend(dayjsTimezone);
+
 export const calendarRouter = Router();
+
+// ---------------------------------------------------------------------------
+// Flexible datetime parsing
+// ---------------------------------------------------------------------------
+
+// Date formats the LLM commonly produces
+const DATE_FORMATS = [
+  'YYYY-MM-DD',       // 2026-02-28  (strict ISO — try first)
+  'DD/MM/YYYY',       // 28/02/2026
+  'MM/DD/YYYY',       // 02/28/2026
+  'D/M/YYYY',         // 2/3/2026
+  'MMMM D, YYYY',     // February 28, 2026
+  'MMMM D YYYY',      // February 28 2026
+  'MMM D, YYYY',      // Feb 28, 2026
+  'MMM D YYYY',       // Feb 28 2026
+  'D MMMM YYYY',      // 28 February 2026
+  'D MMM YYYY',       // 28 Feb 2026
+];
+
+// Time formats the LLM commonly produces
+const TIME_FORMATS = [
+  'HH:mm',            // 14:30
+  'H:mm',             // 9:30
+  'HH:mm:ss',         // 14:30:00
+  'h:mm A',           // 2:30 PM
+  'h:mm a',           // 2:30 pm
+  'h A',              // 3 PM
+  'h a',              // 3 pm
+  'hA',               // 3PM
+  'ha',               // 3pm
+  'h:mm:ss A',        // 2:30:00 PM
+];
+
+/**
+ * Tries every DATE × TIME format combination via dayjs customParseFormat.
+ * Returns an ISO-8601 local datetime string "YYYY-MM-DDTHH:mm:ss" in the
+ * given IANA timezone, or throws if no format matches.
+ */
+function parseFlexibleDatetime(
+  rawDate: string,
+  rawTime: string,
+  tz: string,
+): { startISO: string; dayjsDt: dayjs.Dayjs } {
+  const combined = `${rawDate.trim()} ${rawTime.trim()}`;
+
+  for (const dateFmt of DATE_FORMATS) {
+    for (const timeFmt of TIME_FORMATS) {
+      const dt = dayjs.tz(combined, `${dateFmt} ${timeFmt}`, tz);
+      if (dt.isValid()) {
+        return {
+          startISO: dt.format('YYYY-MM-DDTHH:mm:ss'),
+          dayjsDt:  dt,
+        };
+      }
+    }
+  }
+
+  throw new Error(
+    `Invalid date/time format received from assistant: date="${rawDate}" time="${rawTime}"`,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Validation schema
@@ -23,20 +92,18 @@ const CreateEventSchema = z.object({
     .trim(),
 
   /**
-   * Date in YYYY-MM-DD format (local date in the provided timezone).
-   * The backend constructs the full datetime — the LLM must NOT perform
-   * timezone offset arithmetic itself.
+   * Date as a plain string — any human-readable format is accepted.
+   * The backend normalises it; the LLM does not need strict YYYY-MM-DD.
+   * Examples: "2026-03-15", "15/03/2026", "March 15, 2026"
    */
-  date: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be in YYYY-MM-DD format'),
+  date: z.string().min(1, 'date is required').trim(),
 
   /**
-   * Time in HH:mm 24-hour format (local time in the provided timezone).
+   * Time as a plain string — any human-readable format is accepted.
+   * The backend normalises it; the LLM does not need strict HH:mm.
+   * Examples: "14:30", "2:30 PM", "3 PM"
    */
-  time: z
-    .string()
-    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'time must be in HH:mm 24-hour format'),
+  time: z.string().min(1, 'time is required').trim(),
 
   /**
    * IANA timezone identifier e.g. "America/New_York", "Europe/London".
@@ -73,6 +140,8 @@ export type CreateEventInput = z.infer<typeof CreateEventSchema>;
 
 calendarRouter.post('/create-event', async (req: Request, res: Response) => {
   // --- 1. Zod schema validation ---
+  console.log('Raw tool input:', req.body);
+
   const parsed = CreateEventSchema.safeParse(req.body);
   if (!parsed.success) {
     const fieldErrors = parsed.error.flatten().fieldErrors;
@@ -85,48 +154,47 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
 
   const { sessionId, name, date, time, timezone, durationMins, title } = parsed.data;
 
-  // --- 2. Construct datetime with luxon and validate not-in-the-past ---
-  const [year, month, day]   = date.split('-').map(Number);
-  const [hour, minute]       = time.split(':').map(Number);
+  // --- 2. Flexible datetime parsing with dayjs ---
+  let startISO: string;
+  let endISO: string;
+  let startDt: dayjs.Dayjs;
 
-  const startDt = DateTime.fromObject(
-    { year, month, day, hour, minute, second: 0, millisecond: 0 },
-    { zone: timezone },
-  );
-
-  if (!startDt.isValid) {
-    req.log.warn({ date, time, timezone }, 'Calendar: invalid datetime constructed');
-    return res.status(400).json({
-      error: 'Invalid date/time combination for the given timezone.',
-    });
+  try {
+    const result = parseFlexibleDatetime(date, time, timezone);
+    startISO = result.startISO;
+    startDt  = result.dayjsDt;
+    endISO   = startDt.add(durationMins, 'minute').format('YYYY-MM-DDTHH:mm:ss');
+  } catch (parseErr) {
+    const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    req.log.warn({ date, time, timezone, error: msg }, 'Calendar: datetime parse failed');
+    return res.status(400).json({ error: msg });
   }
 
-  if (startDt <= DateTime.now()) {
-    req.log.warn({ startDt: startDt.toISO(), timezone }, 'Calendar: event is in the past');
+  console.log('Generated ISO start:', startISO, '| end:', endISO);
+
+  // --- 3. Past-date guard ---
+  if (!startDt.isAfter(dayjs())) {
+    req.log.warn({ startISO, timezone }, 'Calendar: event is in the past');
     return res.status(400).json({
       error: 'The requested event time is in the past. Please choose a future date and time.',
     });
   }
 
-  const endDt        = startDt.plus({ minutes: durationMins });
-  // RFC3339 with offset — safe to pass directly to Google Calendar API
-  const startRFC3339 = startDt.toISO()!;
-  const endRFC3339   = endDt.toISO()!;
-  const eventTitle   = title ?? `Meeting with ${name}`;
+  const eventTitle = title ?? `Meeting with ${name}`;
 
   req.log.info(
     {
       sessionIdHash: hashSessionId(sessionId),
       eventTitle,
-      startRFC3339,
-      endRFC3339,
+      startISO,
+      endISO,
       timezone,
       durationMins,
     },
     'Calendar: create-event request validated',
   );
 
-  // --- 3. Create event via Google Calendar ---
+  // --- 4. Create event via Google Calendar ---
   // buildAuthorisedClient (inside calendarService) loads the refresh token from
   // SQLite by sessionId and throws GoogleApiError(401) if no session is found.
   try {
@@ -135,27 +203,23 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       requestId:    req.requestId,
       title:        eventTitle,
       description:  `Scheduled for ${name}`,
-      startRFC3339,
-      endRFC3339,
+      startRFC3339: startISO,
+      endRFC3339:   endISO,
       timezone,
     });
 
     return res.status(201).json({
-      ok:           true,
-      eventId:      result.eventId,
-      htmlLink:     result.htmlLink,
-      summary:      eventTitle,
-      startISO:     startRFC3339,
-      endISO:       endRFC3339,
+      ok:       true,
+      eventId:  result.eventId,
+      htmlLink: result.htmlLink,
+      summary:  eventTitle,
+      startISO,
+      endISO,
       timezone,
     });
   } catch (err) {
     if (err instanceof GoogleApiError) {
-      // Status code already determined by error mapper — pass it through
-      return res.status(err.statusCode).json({
-        ok:     false,
-        error:  err.message,
-      });
+      return res.status(err.statusCode).json({ ok: false, error: err.message });
     }
 
     const message = err instanceof Error ? err.message : 'Unknown error';

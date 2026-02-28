@@ -79,64 +79,61 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
   <div class="card">
     <h1>Schedule with Voice</h1>
     <p>Click below to speak with your AI scheduling assistant.</p>
-    <button id="startBtn" onclick="startCall()">Start Voice Call</button>
+    <button id="startBtn">Start Voice Call</button>
     <div id="status"></div>
   </div>
 
   <!--
-    Official Vapi Web SDK loaded synchronously — exposes the global Vapi constructor.
-    Must appear before the inline script so new Vapi() is always defined.
+    Vapi Web SDK loaded via ESM from esm.sh — no CDN domain required.
+    type="module" defers automatically and scopes all variables locally,
+    so the event listener is wired inside the module rather than via onclick.
   -->
-  <script src="https://cdn.vapi.ai/sdk/web.js"></script>
+  <script type="module">
+    import Vapi from "https://esm.sh/@vapi-ai/web";
 
-  <script>
-    // Server-injected values — never derived from URL params on the client
-    var PUBLIC_KEY   = "${safePublicKey}";
-    var ASSISTANT_ID = "${safeAssistantId}";
-    var SESSION_ID   = "${safeSessionId}";
+    // Server-injected values
+    const PUBLIC_KEY   = "${safePublicKey}";
+    const ASSISTANT_ID = "${safeAssistantId}";
+    const SESSION_ID   = "${safeSessionId}";
 
-    async function startCall() {
-      var btn    = document.getElementById('startBtn');
-      var status = document.getElementById('status');
+    const btn    = document.getElementById('startBtn');
+    const status = document.getElementById('status');
 
+    const vapi = new Vapi(PUBLIC_KEY);
+
+    vapi.on('call-start', () => {
+      status.textContent = 'Call started \u2014 speak now!';
+    });
+    vapi.on('call-end', () => {
+      status.textContent = 'Call ended.';
+      btn.disabled = false;
+    });
+    vapi.on('error', (e) => {
+      status.textContent = 'Connection error. Please refresh and try again.';
+      btn.disabled = false;
+      console.error('Vapi error:', e);
+    });
+
+    btn.addEventListener('click', async () => {
       btn.disabled       = true;
       status.textContent = 'Connecting\u2026';
 
       try {
-        // Vapi constructor takes the PUBLIC KEY (not the assistant ID)
-        var vapi = new Vapi(PUBLIC_KEY);
+        const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-        // Detect IANA timezone and forward it to the agent via call metadata.
-        var browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-        vapi.on('call-start', function () {
-          status.textContent = 'Call started \u2014 speak now!';
-        });
-        vapi.on('call-end', function () {
-          status.textContent = 'Call ended.';
-          btn.disabled = false;
-        });
-        vapi.on('error', function (e) {
-          status.textContent = 'Connection error. Please refresh and try again.';
-          btn.disabled = false;
-          console.error('Vapi error:', e);
-        });
-
-        // Use object form: assistant ID + metadata in a single config object
-        vapi.start({
+        await vapi.start({
           assistant: ASSISTANT_ID,
           metadata: {
             sessionId: SESSION_ID,
             timezone:  browserTimezone,
           },
         });
-
       } catch (e) {
         status.textContent = 'Failed to start voice call. Please refresh and try again.';
         btn.disabled = false;
         console.error('Vapi init error:', e);
       }
-    }
+    });
   </script>
 </body>
 </html>`;

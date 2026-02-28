@@ -99,7 +99,10 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
     const btn    = document.getElementById('startBtn');
     const status = document.getElementById('status');
 
-    const vapi = new Vapi(PUBLIC_KEY);
+    const vapi = new Vapi({
+      publicKey:   PUBLIC_KEY,
+      assistantId: ASSISTANT_ID,
+    });
 
     vapi.on('call-start', () => {
       status.textContent = 'Call started \u2014 speak now!';
@@ -119,15 +122,7 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
       status.textContent = 'Connecting\u2026';
 
       try {
-        const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-        await vapi.start({
-          assistantId: ASSISTANT_ID,
-          metadata: {
-            sessionId: SESSION_ID,
-            timezone:  browserTimezone,
-          },
-        });
+        await vapi.start();
       } catch (e) {
         status.textContent = 'Failed to start voice call. Please refresh and try again.';
         btn.disabled = false;

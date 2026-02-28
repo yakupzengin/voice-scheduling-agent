@@ -27,14 +27,8 @@ RUN npm ci --omit=dev
 # Copy compiled output from build stage
 COPY --from=builder /app/dist ./dist
 
-# Non-root user for security
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-
-# Create the /data directory and give the non-root user write access.
-# Railway mounts the persistent volume here — the process must own the path.
-RUN mkdir -p /data && chown appuser:appgroup /data
-
-USER appuser
+# Create the /data directory for the Railway-mounted SQLite volume.
+RUN mkdir -p /data
 
 EXPOSE 3000
 

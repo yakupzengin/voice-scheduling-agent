@@ -84,19 +84,17 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
   </div>
 
   <!--
-    Vapi SDK is loaded lazily via dynamic import() when the user clicks the button.
-    startCall is defined in a plain script tag so it is available in global scope
-    immediately -- no dependency on the CDN loading first.
-    If the CDN import fails the catch block shows a friendly error.
+    Official Vapi Web SDK loaded synchronously — exposes the global Vapi constructor.
+    Must appear before the inline script so new Vapi() is always defined.
   -->
+  <script src="https://cdn.vapi.ai/sdk/web.js"></script>
+
   <script>
     // Server-injected values — never derived from URL params on the client
     var PUBLIC_KEY   = "${safePublicKey}";
     var ASSISTANT_ID = "${safeAssistantId}";
     var SESSION_ID   = "${safeSessionId}";
 
-    // Defined in regular script scope = available as window.startCall immediately.
-    // onclick="startCall()" on the button will always find this.
     async function startCall() {
       var btn    = document.getElementById('startBtn');
       var status = document.getElementById('status');
@@ -105,16 +103,10 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
       status.textContent = 'Connecting\u2026';
 
       try {
-        // Lazy-load the ESM build of the Vapi Web SDK.
-        // Using dist/index.js (ESM) -- NOT dist/vapi.js (CommonJS, breaks in browsers).
-        var mod  = await import('https://cdn.jsdelivr.net/npm/@vapi-ai/web@latest/dist/index.js');
-        var Vapi = mod.default;
-
         // Vapi constructor takes the PUBLIC KEY (not the assistant ID)
         var vapi = new Vapi(PUBLIC_KEY);
 
         // Detect IANA timezone and forward it to the agent via call metadata.
-        // The agent defaults to this value and only asks if the user wants a change.
         var browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
         vapi.on('call-start', function () {
@@ -130,8 +122,9 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
           console.error('Vapi error:', e);
         });
 
-        // assistant ID goes to .start(), not the constructor
-        vapi.start(ASSISTANT_ID, {
+        // Use object form: assistant ID + metadata in a single config object
+        vapi.start({
+          assistant: ASSISTANT_ID,
           metadata: {
             sessionId: SESSION_ID,
             timezone:  browserTimezone,
@@ -139,7 +132,7 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
         });
 
       } catch (e) {
-        status.textContent = 'Failed to load voice SDK. Please refresh and try again.';
+        status.textContent = 'Failed to start voice call. Please refresh and try again.';
         btn.disabled = false;
         console.error('Vapi init error:', e);
       }

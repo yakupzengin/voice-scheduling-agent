@@ -78,37 +78,90 @@ export type CreateEventInput = z.infer<typeof CreateEventSchema>;
 
 calendarRouter.post('/create-event', async (req: Request, res: Response) => {
   // --- 0. Write 'received' audit entry FIRST — before any processing ---
-  // This ensures every request is captured even if Zod rejects it immediately.
-  // sessionIdHash falls back to '--' when the body has no parseable sessionId.
-  const earlySessionIdHash =
-    typeof req.body?.sessionId === 'string' && req.body.sessionId.length > 0
-      ? hashSessionId(req.body.sessionId as string)
-      : '--';
-
   writeCalendarAuditLog({
     timestamp:     new Date().toISOString(),
     requestId:     req.requestId,
-    sessionIdHash: earlySessionIdHash,
+    sessionIdHash: '--',
     stage:         'received',
     rawBody:       req.body,
   });
 
-  // --- 1. Log raw request ---
+  // --- 1. Log raw request (full body — critical for debugging Vapi envelope) ---
   console.log('===== TOOL REQUEST RECEIVED =====');
   console.log('Headers:', JSON.stringify(req.headers, null, 2));
   console.log('Raw Body:', JSON.stringify(req.body, null, 2));
   console.log('=================================');
 
-  // --- 2. Zod schema validation ---
-  const parseResult = CreateEventSchema.safeParse(req.body);
+  // ---------------------------------------------------------------------------
+  // --- 2. Unwrap Vapi webhook envelope ---
+  //
+  // Vapi POSTs tool calls as:
+  //   { message: { type: "tool-calls", toolCallList: [{ id, function: { name, arguments } }], call: { metadata } } }
+  //
+  // We extract:
+  //   - toolCallId  — required for the Vapi response format
+  //   - args        — the actual tool arguments (flat object)
+  //   - callMeta    — call.metadata fallback for sessionId / timezone
+  //
+  // If the body is already flat (e.g. direct curl test), we use it as-is.
+  // ---------------------------------------------------------------------------
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const body = req.body as any;
+  const isVapiEnvelope =
+    body?.message?.type === 'tool-calls' &&
+    Array.isArray(body?.message?.toolCallList) &&
+    body.message.toolCallList.length > 0;
+
+  const toolCallId: string | undefined = isVapiEnvelope
+    ? (body.message.toolCallList[0].id as string | undefined)
+    : undefined;
+
+  // Raw args — either unwrapped from Vapi envelope or the body itself
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rawArgs: Record<string, any> = isVapiEnvelope
+    ? (body.message.toolCallList[0].function?.arguments ?? {})
+    : body;
+
+  // call.metadata provides sessionId and timezone injected by the session page
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const callMeta: Record<string, any> = isVapiEnvelope
+    ? (body.message?.call?.metadata ?? {})
+    : {};
+
+  // Merge: explicit args take precedence; metadata fills missing sessionId / timezone
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const merged: Record<string, any> = {
+    sessionId: callMeta.sessionId,
+    timezone:  callMeta.timezone,
+    ...rawArgs,
+  };
+
+  req.log.info(
+    { isVapiEnvelope, toolCallId, argKeys: Object.keys(rawArgs), metaKeys: Object.keys(callMeta) },
+    'Calendar: envelope unwrapped',
+  );
+
+  // Helper: send a response in Vapi's expected format.
+  // Always HTTP 200 — non-200 causes Vapi to show "No result returned" to the LLM.
+  // For errors we return a descriptive string so the LLM can relay it to the user.
+  function vapiReply(result: string, httpStatus = 200): void {
+    if (toolCallId) {
+      res.status(httpStatus).json({ results: [{ toolCallId, result }] });
+    } else {
+      // Direct (non-Vapi) caller — use plain JSON
+      res.status(httpStatus).json({ error: result });
+    }
+  }
+
+  // --- 3. Zod schema validation ---
+  const parseResult = CreateEventSchema.safeParse(merged);
   if (!parseResult.success) {
     const fieldErrors = parseResult.error.flatten().fieldErrors;
-    req.log.warn({ fieldErrors }, 'Calendar: validation failed');
+    req.log.warn({ fieldErrors, merged }, 'Calendar: validation failed');
 
-    // Best-effort sessionIdHash even on invalid bodies
     const sessionIdHash =
-      typeof req.body?.sessionId === 'string' && req.body.sessionId.length > 0
-        ? hashSessionId(req.body.sessionId as string)
+      typeof merged?.sessionId === 'string' && merged.sessionId.length > 0
+        ? hashSessionId(merged.sessionId as string)
         : '--';
 
     writeCalendarAuditLog({
@@ -120,10 +173,12 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       errorMessage:  JSON.stringify(fieldErrors),
     });
 
-    return res.status(400).json({
-      error:   'Validation failed',
-      details: fieldErrors,
-    });
+    const errorSummary = Object.entries(fieldErrors)
+      .map(([field, msgs]) => `${field}: ${(msgs as string[]).join(', ')}`)
+      .join('; ');
+
+    vapiReply(`Validation failed — ${errorSummary}`);
+    return;
   }
 
   const { sessionId, name, date, time, timezone, durationMins, title } = parseResult.data;
@@ -163,7 +218,8 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       errorMessage: msg,
     });
 
-    return res.status(400).json({ error: msg });
+    vapiReply(msg);
+    return;
   }
 
   const startDt = DateTime.fromJSDate(parsedDate).setZone(timezone);
@@ -185,7 +241,8 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       errorMessage: msg,
     });
 
-    return res.status(400).json({ error: msg });
+    vapiReply(msg);
+    return;
   }
 
   const startISO = startDt.toFormat("yyyy-MM-dd'T'HH:mm:ss");
@@ -213,7 +270,8 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       errorMessage:   msg,
     });
 
-    return res.status(400).json({ error: msg });
+    vapiReply(msg);
+    return;
   }
 
   const eventTitle = title ?? `Meeting with ${name}`;
@@ -261,15 +319,11 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       htmlLink:       result.htmlLink,
     });
 
-    return res.status(201).json({
-      ok:       true,
-      eventId:  result.eventId,
-      htmlLink: result.htmlLink,
-      summary:  eventTitle,
-      startISO,
-      endISO,
-      timezone,
-    });
+    vapiReply(
+      `Successfully created "${eventTitle}" on ${startISO} (${timezone}). ` +
+      `Event link: ${result.htmlLink}`,
+    );
+    return;
 
   } catch (err) {
     if (err instanceof GoogleApiError) {
@@ -288,7 +342,8 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
         errorMessage:   err.message,
       });
 
-      return res.status(err.statusCode).json({ ok: false, error: err.message });
+      vapiReply(err.message);
+      return;
     }
 
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -309,6 +364,7 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       errorMessage:   message,
     });
 
-    return res.status(500).json({ ok: false, error: 'Internal server error.' });
+    vapiReply('Internal server error. Please try again.');
+    return;
   }
 });

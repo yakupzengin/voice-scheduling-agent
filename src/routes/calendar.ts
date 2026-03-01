@@ -1,83 +1,22 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { IANAZone } from 'luxon';
-import dayjs from 'dayjs';
-import customParseFormat from 'dayjs/plugin/customParseFormat';
-import utc from 'dayjs/plugin/utc';
-import dayjsTimezone from 'dayjs/plugin/timezone';
+import * as chrono from 'chrono-node';
+import { DateTime, IANAZone } from 'luxon';
 import { hashSessionId } from '../utils/logger';
+import { writeCalendarAuditLog, type CalendarAuditEntry } from '../utils/auditLog';
 import { createCalendarEvent } from '../services/calendarService';
 import { GoogleApiError } from '../services/googleAuth';
-
-dayjs.extend(customParseFormat);
-dayjs.extend(utc);
-dayjs.extend(dayjsTimezone);
 
 export const calendarRouter = Router();
 
 // ---------------------------------------------------------------------------
-// Flexible datetime parsing
-// ---------------------------------------------------------------------------
-
-// Date formats the LLM commonly produces
-const DATE_FORMATS = [
-  'YYYY-MM-DD',       // 2026-02-28  (strict ISO — try first)
-  'DD/MM/YYYY',       // 28/02/2026
-  'MM/DD/YYYY',       // 02/28/2026
-  'D/M/YYYY',         // 2/3/2026
-  'MMMM D, YYYY',     // February 28, 2026
-  'MMMM D YYYY',      // February 28 2026
-  'MMM D, YYYY',      // Feb 28, 2026
-  'MMM D YYYY',       // Feb 28 2026
-  'D MMMM YYYY',      // 28 February 2026
-  'D MMM YYYY',       // 28 Feb 2026
-];
-
-// Time formats the LLM commonly produces
-const TIME_FORMATS = [
-  'HH:mm',            // 14:30
-  'H:mm',             // 9:30
-  'HH:mm:ss',         // 14:30:00
-  'h:mm A',           // 2:30 PM
-  'h:mm a',           // 2:30 pm
-  'h A',              // 3 PM
-  'h a',              // 3 pm
-  'hA',               // 3PM
-  'ha',               // 3pm
-  'h:mm:ss A',        // 2:30:00 PM
-];
-
-/**
- * Tries every DATE × TIME format combination via dayjs customParseFormat.
- * Returns an ISO-8601 local datetime string "YYYY-MM-DDTHH:mm:ss" in the
- * given IANA timezone, or throws if no format matches.
- */
-function parseFlexibleDatetime(
-  rawDate: string,
-  rawTime: string,
-  tz: string,
-): { startISO: string; dayjsDt: dayjs.Dayjs } {
-  const combined = `${rawDate.trim()} ${rawTime.trim()}`;
-
-  for (const dateFmt of DATE_FORMATS) {
-    for (const timeFmt of TIME_FORMATS) {
-      const dt = dayjs.tz(combined, `${dateFmt} ${timeFmt}`, tz);
-      if (dt.isValid()) {
-        return {
-          startISO: dt.format('YYYY-MM-DDTHH:mm:ss'),
-          dayjsDt:  dt,
-        };
-      }
-    }
-  }
-
-  throw new Error(
-    `Invalid date/time format received from assistant: date="${rawDate}" time="${rawTime}"`,
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Validation schema
+//
+// date and time are accepted as plain strings — the backend resolves them
+// deterministically via chrono-node using the server's real-time clock.
+// The LLM only collects the user's intent; it never needs to convert or
+// format dates itself.  This permanently eliminates the "Oct 2023" issue
+// that arose when the LLM anchored relative expressions to its training data.
 // ---------------------------------------------------------------------------
 
 const CreateEventSchema = z.object({
@@ -92,23 +31,22 @@ const CreateEventSchema = z.object({
     .trim(),
 
   /**
-   * Date as a plain string — any human-readable format is accepted.
-   * The backend normalises it; the LLM does not need strict YYYY-MM-DD.
-   * Examples: "2026-03-15", "15/03/2026", "March 15, 2026"
+   * Date as provided by the user — any natural-language string is accepted
+   * (e.g. "today", "tomorrow", "5 March", "2026-03-15").
+   * chrono-node resolves it server-side using the real runtime clock.
    */
   date: z.string().min(1, 'date is required').trim(),
 
   /**
-   * Time as a plain string — any human-readable format is accepted.
-   * The backend normalises it; the LLM does not need strict HH:mm.
-   * Examples: "14:30", "2:30 PM", "3 PM"
+   * Time as provided by the user — any natural-language string is accepted
+   * (e.g. "3 PM", "15:00", "3pm", "3 in the afternoon").
+   * chrono-node resolves it server-side using the real runtime clock.
    */
   time: z.string().min(1, 'time is required').trim(),
 
   /**
    * IANA timezone identifier e.g. "America/New_York", "Europe/London".
-   * Validated against luxon's IANAZone — guarantees DST is handled correctly
-   * by the Google Calendar API.
+   * Injected automatically from browser metadata — no LLM guessing needed.
    */
   timezone: z
     .string()
@@ -139,64 +77,164 @@ export type CreateEventInput = z.infer<typeof CreateEventSchema>;
 // ---------------------------------------------------------------------------
 
 calendarRouter.post('/create-event', async (req: Request, res: Response) => {
-  // --- 1. Zod schema validation ---
-  console.log('Raw tool input:', req.body);
+  // --- 0. Write 'received' audit entry FIRST — before any processing ---
+  // This ensures every request is captured even if Zod rejects it immediately.
+  // sessionIdHash falls back to '--' when the body has no parseable sessionId.
+  const earlySessionIdHash =
+    typeof req.body?.sessionId === 'string' && req.body.sessionId.length > 0
+      ? hashSessionId(req.body.sessionId as string)
+      : '--';
 
-  const parsed = CreateEventSchema.safeParse(req.body);
-  if (!parsed.success) {
-    const fieldErrors = parsed.error.flatten().fieldErrors;
+  writeCalendarAuditLog({
+    timestamp:     new Date().toISOString(),
+    requestId:     req.requestId,
+    sessionIdHash: earlySessionIdHash,
+    stage:         'received',
+    rawBody:       req.body,
+  });
+
+  // --- 1. Log raw request ---
+  console.log('===== TOOL REQUEST RECEIVED =====');
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('Raw Body:', JSON.stringify(req.body, null, 2));
+  console.log('=================================');
+
+  // --- 2. Zod schema validation ---
+  const parseResult = CreateEventSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    const fieldErrors = parseResult.error.flatten().fieldErrors;
     req.log.warn({ fieldErrors }, 'Calendar: validation failed');
+
+    // Best-effort sessionIdHash even on invalid bodies
+    const sessionIdHash =
+      typeof req.body?.sessionId === 'string' && req.body.sessionId.length > 0
+        ? hashSessionId(req.body.sessionId as string)
+        : '--';
+
+    writeCalendarAuditLog({
+      timestamp:     new Date().toISOString(),
+      requestId:     req.requestId,
+      sessionIdHash,
+      stage:         'validation_error',
+      rawBody:       req.body,
+      errorMessage:  JSON.stringify(fieldErrors),
+    });
+
     return res.status(400).json({
-      error: 'Validation failed',
+      error:   'Validation failed',
       details: fieldErrors,
     });
   }
 
-  const { sessionId, name, date, time, timezone, durationMins, title } = parsed.data;
+  const { sessionId, name, date, time, timezone, durationMins, title } = parseResult.data;
 
-  // --- 2. Flexible datetime parsing with dayjs ---
-  let startISO: string;
-  let endISO: string;
-  let startDt: dayjs.Dayjs;
+  // Compute once — used in every audit entry for this request
+  const sessionIdHash = hashSessionId(sessionId);
 
-  try {
-    const result = parseFlexibleDatetime(date, time, timezone);
-    startISO = result.startISO;
-    startDt  = result.dayjsDt;
-    endISO   = startDt.add(durationMins, 'minute').format('YYYY-MM-DDTHH:mm:ss');
-  } catch (parseErr) {
-    const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-    req.log.warn({ date, time, timezone, error: msg }, 'Calendar: datetime parse failed');
+  // Shared input block for all audit entries
+  const auditInput: CalendarAuditEntry['input'] = {
+    date, time, timezone, durationMins, name, title,
+  };
+
+  // --- 3. chrono-node date/time parsing ---
+  //
+  // The LLM sends whatever the user said — "today", "5 March", "3 PM", etc.
+  // chrono-node resolves the combined string against the server's real clock
+  // with forwardDate:true so ambiguous expressions always resolve to the
+  // future.  This permanently eliminates LLM training-data anchoring issues.
+  //
+  const combined = `${date} ${time}`;
+  const parsedDate = chrono.parseDate(combined, new Date(), { forwardDate: true });
+
+  if (!parsedDate) {
+    const msg =
+      `Could not parse date/time from: "${combined}". ` +
+      'Please provide a recognisable date and time (e.g. "tomorrow at 3pm" or "5 March at 14:00").';
+    req.log.warn({ date, time, combined }, 'Calendar: chrono could not parse datetime');
+
+    writeCalendarAuditLog({
+      timestamp:    new Date().toISOString(),
+      requestId:    req.requestId,
+      sessionIdHash,
+      stage:        'validation_error',
+      rawBody:      req.body,
+      input:        auditInput,
+      timezone,
+      errorMessage: msg,
+    });
+
     return res.status(400).json({ error: msg });
   }
 
-  console.log('Generated ISO start:', startISO, '| end:', endISO);
+  const startDt = DateTime.fromJSDate(parsedDate).setZone(timezone);
 
-  // --- 3. Past-date guard ---
-  if (!startDt.isAfter(dayjs())) {
-    req.log.warn({ startISO, timezone }, 'Calendar: event is in the past');
-    return res.status(400).json({
-      error: 'The requested event time is in the past. Please choose a future date and time.',
+  if (!startDt.isValid) {
+    const msg =
+      `Parsed datetime is invalid for timezone "${timezone}". ` +
+      (startDt.invalidExplanation ?? 'luxon could not apply the timezone.');
+    req.log.warn({ combined, timezone, reason: startDt.invalidExplanation }, 'Calendar: invalid timezone application');
+
+    writeCalendarAuditLog({
+      timestamp:    new Date().toISOString(),
+      requestId:    req.requestId,
+      sessionIdHash,
+      stage:        'validation_error',
+      rawBody:      req.body,
+      input:        auditInput,
+      timezone,
+      errorMessage: msg,
     });
+
+    return res.status(400).json({ error: msg });
+  }
+
+  const startISO = startDt.toFormat("yyyy-MM-dd'T'HH:mm:ss");
+  const endISO   = startDt.plus({ minutes: durationMins }).toFormat("yyyy-MM-dd'T'HH:mm:ss");
+
+  console.log(`[create-event] parsed → startISO=${startISO}  endISO=${endISO}  zone=${timezone}`);
+
+  // --- 4. Past-date guard ---
+  if (startDt <= DateTime.now().setZone(timezone)) {
+    const msg =
+      `The requested time ${startISO} (${timezone}) is in the past. ` +
+      'Please choose a future date and time.';
+    req.log.warn({ startISO, timezone }, 'Calendar: event is in the past');
+
+    writeCalendarAuditLog({
+      timestamp:      new Date().toISOString(),
+      requestId:      req.requestId,
+      sessionIdHash,
+      stage:          'past_time',
+      rawBody:        req.body,
+      input:          auditInput,
+      parsedStartISO: startISO,
+      parsedEndISO:   endISO,
+      timezone,
+      errorMessage:   msg,
+    });
+
+    return res.status(400).json({ error: msg });
   }
 
   const eventTitle = title ?? `Meeting with ${name}`;
 
   req.log.info(
-    {
-      sessionIdHash: hashSessionId(sessionId),
-      eventTitle,
-      startISO,
-      endISO,
-      timezone,
-      durationMins,
-    },
+    { sessionIdHash, eventTitle, startISO, endISO, timezone, durationMins },
     'Calendar: create-event request validated',
   );
 
-  // --- 4. Create event via Google Calendar ---
-  // buildAuthorisedClient (inside calendarService) loads the refresh token from
-  // SQLite by sessionId and throws GoogleApiError(401) if no session is found.
+  // --- 5. Build Google payload (also stored in audit on success/error) ---
+  const googlePayload: CalendarAuditEntry['googlePayload'] = {
+    summary: eventTitle,
+    start:   { dateTime: startISO, timeZone: timezone },
+    end:     { dateTime: endISO,   timeZone: timezone },
+  };
+
+  console.log('===== GOOGLE EVENT INPUT =====');
+  console.log(googlePayload);
+  console.log('================================');
+
+  // --- 6. Create event via Google Calendar ---
   try {
     const result = await createCalendarEvent({
       sessionId,
@@ -208,6 +246,21 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       timezone,
     });
 
+    writeCalendarAuditLog({
+      timestamp:      new Date().toISOString(),
+      requestId:      req.requestId,
+      sessionIdHash,
+      stage:          'google_success',
+      rawBody:        req.body,
+      input:          auditInput,
+      parsedStartISO: startISO,
+      parsedEndISO:   endISO,
+      timezone,
+      googlePayload,
+      eventId:        result.eventId,
+      htmlLink:       result.htmlLink,
+    });
+
     return res.status(201).json({
       ok:       true,
       eventId:  result.eventId,
@@ -217,16 +270,45 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       endISO,
       timezone,
     });
+
   } catch (err) {
     if (err instanceof GoogleApiError) {
+      writeCalendarAuditLog({
+        timestamp:      new Date().toISOString(),
+        requestId:      req.requestId,
+        sessionIdHash,
+        stage:          'google_error',
+        rawBody:        req.body,
+        input:          auditInput,
+        parsedStartISO: startISO,
+        parsedEndISO:   endISO,
+        timezone,
+        googlePayload,
+        googleStatus:   err.statusCode,
+        errorMessage:   err.message,
+      });
+
       return res.status(err.statusCode).json({ ok: false, error: err.message });
     }
 
     const message = err instanceof Error ? err.message : 'Unknown error';
-    req.log.error(
-      { sessionIdHash: hashSessionId(sessionId), error: message },
-      'Calendar: unexpected error',
-    );
+    req.log.error({ sessionIdHash, error: message }, 'Calendar: unexpected error');
+
+    writeCalendarAuditLog({
+      timestamp:      new Date().toISOString(),
+      requestId:      req.requestId,
+      sessionIdHash,
+      stage:          'google_error',
+      rawBody:        req.body,
+      input:          auditInput,
+      parsedStartISO: startISO,
+      parsedEndISO:   endISO,
+      timezone,
+      googlePayload,
+      googleStatus:   500,
+      errorMessage:   message,
+    });
+
     return res.status(500).json({ ok: false, error: 'Internal server error.' });
   }
 });

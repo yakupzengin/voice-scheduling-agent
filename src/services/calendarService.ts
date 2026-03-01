@@ -97,6 +97,10 @@ export async function createCalendarEvent(
       htmlLink: data.htmlLink,
     };
   } catch (err) {
+    console.error('===== EVENT CREATION ERROR =====');
+    console.error(err);
+    console.error('================================');
+
     // Don't double-wrap GoogleApiErrors
     if (err instanceof GoogleApiError) {
       log.warn(

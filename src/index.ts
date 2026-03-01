@@ -79,6 +79,10 @@ app.listen(env.PORT, () => {
     { port: env.PORT, env: env.NODE_ENV, dbPath: env.DB_PATH },
     'Voice scheduling agent server started',
   );
+
+  // Print audit log location so it's easy to find in both dev and Railway logs
+  const { AUDIT_FILE } = require('./utils/auditLog');
+  logger.info({ auditLog: AUDIT_FILE }, 'Calendar audit log path');
 });
 
 export default app;

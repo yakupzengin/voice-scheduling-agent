@@ -120,10 +120,63 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
       status.textContent = 'Connecting\u2026';
 
       try {
-        // Debug: confirm values are injected correctly (safe — key is truncated)
-        console.log('[vapi] pubKey prefix:', PUBLIC_KEY.slice(0, 8), '| assistantId:', ASSISTANT_ID);
+        // --- Temporal context ---
+        // timezone: IANA name from the browser (e.g. "Europe/Istanbul")
+        // nowISO:   UTC instant — used by the assistant for current-time awareness
+        // todayISO: local calendar date YYYY-MM-DD in the user's timezone.
+        //           The sv-SE locale formats dates as YYYY-MM-DD natively,
+        //           avoiding manual string concatenation.
+        //
+        // These are passed in BOTH metadata (accessible via {{call.metadata.*}}
+        // in the Vapi system prompt) AND variableValues (accessible via {{*}}
+        // directly in the prompt template).
+        //
+        // Recommended system-prompt addition in the Vapi dashboard:
+        //   "Today's date is {{todayISO}}. Current UTC time is {{nowISO}}.
+        //    The user's timezone is {{timezone}}.
+        //    You MUST use these values to resolve relative dates like 'today'
+        //    or 'tomorrow'. Always output date as YYYY-MM-DD and time as HH:mm
+        //    (24-hour) when calling the create-event tool."
 
-        await vapi.start(ASSISTANT_ID);
+        const timezone  = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const nowISO    = new Date().toISOString();
+        const todayISO  = new Intl.DateTimeFormat('sv-SE', { timeZone: timezone }).format(new Date());
+
+        console.log('[vapi] temporal context →', { timezone, nowISO, todayISO });
+
+        // ---------------------------------------------------------------
+        // Vapi template resolution explained:
+        //
+        // The system prompt uses {{metadata.todayISO}}, {{metadata.nowISO}},
+        // and {{metadata.timezone}} as template tokens.
+        //
+        // Vapi replaces {{token}} values from the variableValues map, where
+        // the key must match the token text EXACTLY, including any dots.
+        //
+        // We therefore pass BOTH forms:
+        //   "metadata.todayISO" → resolves {{metadata.todayISO}} in the prompt
+        //   "todayISO"          → resolves {{todayISO}} if prompt is updated
+        // ---------------------------------------------------------------
+        await vapi.start(ASSISTANT_ID, {
+          metadata: {
+            sessionId: SESSION_ID,
+            timezone,
+            nowISO,
+            todayISO,
+          },
+          variableValues: {
+            // Dotted keys — match {{metadata.*}} tokens in the current system prompt
+            "metadata.sessionId": SESSION_ID,
+            "metadata.timezone":  timezone,
+            "metadata.nowISO":    nowISO,
+            "metadata.todayISO":  todayISO,
+            // Plain keys — match {{*}} tokens if the system prompt is updated
+            sessionId: SESSION_ID,
+            timezone,
+            nowISO,
+            todayISO,
+          },
+        });
       } catch (e) {
         // Log the full error so the browser console shows the real cause
         console.error('[vapi] start() threw:', JSON.stringify(e, Object.getOwnPropertyNames(e)));

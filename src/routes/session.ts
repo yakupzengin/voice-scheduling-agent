@@ -290,12 +290,8 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
     }
 
     // ── Meeting card ─────────────────────────────────────────────────
-    function tryAddMeeting(resultStr) {
-      // Parse: Successfully created "TITLE" on 2026-03-03T23:00:00 (TIMEZONE).
-      const m = resultStr.match(/Successfully created "([^"]+)" on ([0-9T:\\-]+) \\(([^)]+)\\)/);
-      if (!m) return;
-      const [, title, startISO, timezone] = m;
-
+    // Called with structured data from the backend (no regex parsing needed).
+    function addEventCard({ title, startISO, timezone, htmlLink }) {
       meetingsEmpty.style.display = 'none';
 
       // Format datetime from ISO without Date() to avoid TZ ambiguity
@@ -310,6 +306,7 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
         displayDt   = MONTHS[mo-1] + ' ' + dy + ', ' + yr + ' — ' + hr12 + ':' + String(mn).padStart(2,'0') + ' ' + ampm;
       } catch (_) {}
 
+      const calLink = htmlLink || 'https://calendar.google.com';
       const card = document.createElement('div');
       card.className = 'meeting-card';
       card.innerHTML =
@@ -317,7 +314,7 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
         '<div class="mc-title">' + esc(title) + '</div>' +
         '<div class="mc-row"><span class="mc-icon">🕐</span><span>' + esc(displayDt) + '</span></div>' +
         '<div class="mc-row"><span class="mc-icon">🌍</span><span>' + esc(timezone) + '</span></div>' +
-        '<a class="mc-link" href="https://calendar.google.com" target="_blank" rel="noopener">📅 Open Google Calendar</a>';
+        '<a class="mc-link" href="' + esc(calLink) + '" target="_blank" rel="noopener">📅 Open in Google Calendar</a>';
 
       meetingsList.prepend(card);
     }
@@ -331,10 +328,23 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
 
     function tryAddMeetingOnce(resultStr) {
       if (!resultStr) return;
-      const key = resultStr.slice(0, 120); // stable identity key
+      const key = resultStr.slice(0, 120);
       if (processedMeetings.has(key)) return;
       processedMeetings.add(key);
       tryAddMeeting(resultStr);
+    }
+
+    // ── Fetch events from backend after call ends ───────────────────────
+    async function loadSessionEvents() {
+      try {
+        const res  = await fetch('/api/session-events/' + SESSION_ID);
+        const data = await res.json();
+        for (const evt of (data.events ?? [])) {
+          addEventCard(evt);
+        }
+      } catch (e) {
+        console.warn('[session-events] fetch failed:', e);
+      }
     }
 
     // ── Vapi events ───────────────────────────────────────────────────
@@ -355,12 +365,14 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
       startBtn.style.display = '';
       startBtn.disabled = false;
       bottomHint.textContent = 'Call ended. You can start a new call anytime.';
+      // Fetch events the backend created during this call
+      loadSessionEvents();
     });
 
     vapi.on('speech-end', () => setSpeaking(null));
 
     vapi.on('message', (msg) => {
-      // Log every message type so we can inspect what the SDK actually sends
+      // Log every non-transcript message for debugging
       if (msg.type !== 'transcript') {
         console.log('[vapi] message:', msg.type, JSON.stringify(msg).slice(0, 300));
       }
@@ -370,32 +382,6 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
         setSpeaking(role);
         showMsg(role, transcript, transcriptType === 'partial');
         if (transcriptType === 'final') setSpeaking(null);
-        return;
-      }
-
-      // Tool call result — direct (some Vapi SDK versions)
-      if (msg.type === 'tool-call-result' || msg.type === 'toolCallResult') {
-        tryAddMeetingOnce(msg.result ?? msg.toolCallResult ?? '');
-        return;
-      }
-
-      // Conversation update — contains full messages array incl. tool results
-      // This is the most reliable way to catch tool output in @vapi-ai/web
-      if (msg.type === 'conversation-update' || msg.type === 'conversationUpdate') {
-        const messages = msg.messages ?? msg.conversation ?? [];
-        for (const m of messages) {
-          // role='tool' or role='function' carries the tool result content
-          if ((m.role === 'tool' || m.role === 'function') && m.content) {
-            tryAddMeetingOnce(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
-          }
-          // Some versions nest results inside toolCallList on assistant messages
-          if (m.role === 'assistant' && Array.isArray(m.toolCalls)) {
-            for (const tc of m.toolCalls) {
-              const res = tc.result ?? tc.output ?? '';
-              if (res) tryAddMeetingOnce(res);
-            }
-          }
-        }
       }
     });
 

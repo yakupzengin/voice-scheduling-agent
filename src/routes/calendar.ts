@@ -10,6 +10,40 @@ import { GoogleApiError } from '../services/googleAuth';
 export const calendarRouter = Router();
 
 // ---------------------------------------------------------------------------
+// In-memory store: sessionId → list of successfully created events
+// Cleared when the process restarts (Railway redeploys).
+// Sufficient for a single-session UI — no persistence needed.
+// ---------------------------------------------------------------------------
+interface SessionEvent {
+  title:    string;
+  startISO: string;
+  timezone: string;
+  htmlLink: string;
+}
+const sessionEventStore = new Map<string, SessionEvent[]>();
+
+/** Append an event to the session store (max 50 per session). */
+function storeSessionEvent(sessionId: string, evt: SessionEvent): void {
+  const list = sessionEventStore.get(sessionId) ?? [];
+  list.push(evt);
+  if (list.length > 50) list.shift();
+  sessionEventStore.set(sessionId, list);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/session-events/:sessionId
+// Returns all events created during this session (called after call-end).
+// ---------------------------------------------------------------------------
+calendarRouter.get('/session-events/:sessionId', (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!UUID_RE.test(sessionId)) {
+    return res.status(400).json({ error: 'Invalid sessionId' });
+  }
+  return res.status(200).json({ events: sessionEventStore.get(sessionId) ?? [] });
+});
+
+// ---------------------------------------------------------------------------
 // Validation schema
 //
 // date and time are accepted as plain strings — the backend resolves them
@@ -344,6 +378,14 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
       googlePayload,
       eventId:        result.eventId,
       htmlLink:       result.htmlLink,
+    });
+
+    // Store for client-side polling after call ends
+    storeSessionEvent(sessionId, {
+      title:    eventTitle,
+      startISO,
+      timezone,
+      htmlLink: result.htmlLink,
     });
 
     vapiReply(

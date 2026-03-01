@@ -194,12 +194,37 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
   // --- 3. chrono-node date/time parsing ---
   //
   // The LLM sends whatever the user said — "today", "5 March", "3 PM", etc.
-  // chrono-node resolves the combined string against the server's real clock
-  // with forwardDate:true so ambiguous expressions always resolve to the
-  // future.  This permanently eliminates LLM training-data anchoring issues.
   //
+  // TIMEZONE TRICK: chrono-node has no timezone awareness — it always uses the
+  // JS environment's local time (UTC on Railway). To make "tomorrow" and
+  // "11 PM" resolve correctly in the USER's timezone we:
+  //
+  //   1. Compute "now" in the user's timezone via luxon.
+  //   2. Build a fake JS Date whose UTC fields hold those local components
+  //      (e.g. if Istanbul is 01:24 on March 2, we create Date(2026,2,2,1,24,0)
+  //       which JS stores as if it were 01:24 UTC).  chrono sees those
+  //      components and resolves "tomorrow" as March 3.
+  //   3. Parse — chrono returns a Date whose UTC fields are the user's
+  //      intended local wall-clock time (23:00 for "11 PM").
+  //   4. Apply the real timezone with keepLocalTime:true — luxon reinterprets
+  //      those UTC components as Istanbul time → 2026-03-03T23:00:00+03:00 ✓
+  //
+  // Without this trick: "11 PM" → parsed as 23:00 UTC → displayed as
+  // 02:00 Istanbul (+3 h shift) — 3-hour error the user observed.
+  //
+  const nowInUserTz = DateTime.now().setZone(timezone);
+  // Fake reference: UTC fields = user's local time components
+  const tzAwareRef = new Date(
+    nowInUserTz.year,
+    nowInUserTz.month - 1,   // JS months are 0-based
+    nowInUserTz.day,
+    nowInUserTz.hour,
+    nowInUserTz.minute,
+    nowInUserTz.second,
+  );
+
   const combined = `${date} ${time}`;
-  const parsedDate = chrono.parseDate(combined, new Date(), { forwardDate: true });
+  const parsedDate = chrono.parseDate(combined, tzAwareRef, { forwardDate: true });
 
   if (!parsedDate) {
     const msg =
@@ -222,7 +247,9 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
     return;
   }
 
-  const startDt = DateTime.fromJSDate(parsedDate).setZone(timezone);
+  // keepLocalTime: true — treat parsedDate's UTC fields as the user's local
+  // wall-clock time, then anchor to the real timezone offset.
+  const startDt = DateTime.fromJSDate(parsedDate).setZone(timezone, { keepLocalTime: true });
 
   if (!startDt.isValid) {
     const msg =

@@ -326,6 +326,17 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
       return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
+    // ── Meeting deduplication set ───────────────────────────────────────
+    const processedMeetings = new Set();
+
+    function tryAddMeetingOnce(resultStr) {
+      if (!resultStr) return;
+      const key = resultStr.slice(0, 120); // stable identity key
+      if (processedMeetings.has(key)) return;
+      processedMeetings.add(key);
+      tryAddMeeting(resultStr);
+    }
+
     // ── Vapi events ───────────────────────────────────────────────────
     vapi.on('call-start', () => {
       statusDot.classList.add('active');
@@ -349,13 +360,42 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
     vapi.on('speech-end', () => setSpeaking(null));
 
     vapi.on('message', (msg) => {
+      // Log every message type so we can inspect what the SDK actually sends
+      if (msg.type !== 'transcript') {
+        console.log('[vapi] message:', msg.type, JSON.stringify(msg).slice(0, 300));
+      }
+
       if (msg.type === 'transcript') {
         const { role, transcriptType, transcript } = msg;
         setSpeaking(role);
         showMsg(role, transcript, transcriptType === 'partial');
         if (transcriptType === 'final') setSpeaking(null);
-      } else if (msg.type === 'tool-call-result') {
-        tryAddMeeting(msg.result ?? '');
+        return;
+      }
+
+      // Tool call result — direct (some Vapi SDK versions)
+      if (msg.type === 'tool-call-result' || msg.type === 'toolCallResult') {
+        tryAddMeetingOnce(msg.result ?? msg.toolCallResult ?? '');
+        return;
+      }
+
+      // Conversation update — contains full messages array incl. tool results
+      // This is the most reliable way to catch tool output in @vapi-ai/web
+      if (msg.type === 'conversation-update' || msg.type === 'conversationUpdate') {
+        const messages = msg.messages ?? msg.conversation ?? [];
+        for (const m of messages) {
+          // role='tool' or role='function' carries the tool result content
+          if ((m.role === 'tool' || m.role === 'function') && m.content) {
+            tryAddMeetingOnce(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
+          }
+          // Some versions nest results inside toolCallList on assistant messages
+          if (m.role === 'assistant' && Array.isArray(m.toolCalls)) {
+            for (const tc of m.toolCalls) {
+              const res = tc.result ?? tc.output ?? '';
+              if (res) tryAddMeetingOnce(res);
+            }
+          }
+        }
       }
     });
 

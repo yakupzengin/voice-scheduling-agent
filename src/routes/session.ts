@@ -145,17 +145,18 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
         console.log('[vapi] temporal context →', { timezone, nowISO, todayISO });
 
         // ---------------------------------------------------------------
-        // Vapi template resolution explained:
+        // Vapi template resolution:
         //
-        // The system prompt uses {{metadata.todayISO}}, {{metadata.nowISO}},
-        // and {{metadata.timezone}} as template tokens.
+        // Vapi replaces {{token}} in the system prompt using the
+        // variableValues map, where the key must match the token text EXACTLY.
         //
-        // Vapi replaces {{token}} values from the variableValues map, where
-        // the key must match the token text EXACTLY, including any dots.
+        // IMPORTANT: Vapi intercepts the "metadata" namespace internally.
+        // Dotted keys like "metadata.todayISO" in variableValues are NOT
+        // substituted into {{metadata.todayISO}} template tokens — they are
+        // silently ignored.
         //
-        // We therefore pass BOTH forms:
-        //   "metadata.todayISO" → resolves {{metadata.todayISO}} in the prompt
-        //   "todayISO"          → resolves {{todayISO}} if prompt is updated
+        // The system prompt MUST use plain tokens: {{sessionId}}, {{timezone}},
+        // {{todayISO}}, {{nowISO}}.  The plain keys below resolve those tokens.
         // ---------------------------------------------------------------
         await vapi.start(ASSISTANT_ID, {
           metadata: {
@@ -165,12 +166,8 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
             todayISO,
           },
           variableValues: {
-            // Dotted keys — match {{metadata.*}} tokens in the current system prompt
-            "metadata.sessionId": SESSION_ID,
-            "metadata.timezone":  timezone,
-            "metadata.nowISO":    nowISO,
-            "metadata.todayISO":  todayISO,
-            // Plain keys — match {{*}} tokens if the system prompt is updated
+            // Plain keys — the system prompt MUST use {{sessionId}}, {{timezone}},
+            // {{todayISO}}, {{nowISO}} for these to be substituted correctly.
             sessionId: SESSION_ID,
             timezone,
             nowISO,

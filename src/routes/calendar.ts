@@ -320,8 +320,7 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
     });
 
     vapiReply(
-      `Successfully created "${eventTitle}" on ${startISO} (${timezone}). ` +
-      `Event link: ${result.htmlLink}`,
+      `Successfully created "${eventTitle}" on ${startISO} (${timezone}).`,
     );
     return;
 

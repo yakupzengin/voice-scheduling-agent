@@ -329,6 +329,398 @@ Token values never appear in logs. Sensitive fields are redacted by pino: `acces
 
 ---
 
+## Calendar Integration — Deep Dive
+
+This section explains the complete lifecycle of a calendar event — from the moment the user speaks to the moment the event appears in Google Calendar. Every design decision is explained with its rationale.
+
+---
+
+### 1. High-Level Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Browser
+    participant Vapi
+    participant LLM as GPT-4o-mini
+    participant Backend as Node.js Backend
+    participant Google as Google Calendar API
+
+    User->>Browser: Click "Start Voice Call"
+    Browser->>Vapi: vapi.start(assistantId, { metadata: { sessionId, timezone } })
+    Vapi->>LLM: System prompt + metadata context
+    User->>Vapi: 🎙 "I want to schedule a meeting tomorrow at 3 PM"
+    Vapi->>LLM: Transcribed speech
+    LLM->>Vapi: Confirm details with user
+    Vapi->>User: 🤖 "Got it — any title for this meeting?"
+    User->>Vapi: 🎙 "Project sync"
+    LLM->>Vapi: Call tool create-event
+    Vapi->>Backend: POST /api/create-event (tool call envelope)
+    Backend->>Backend: Unwrap Vapi envelope, Zod validation
+    Backend->>Backend: chrono-node NLP parsing (timezone-aware)
+    Backend->>Backend: Past-time guard (luxon)
+    Backend->>Google: calendar.events.insert (RFC3339 + IANA zone)
+    Google-->>Backend: { eventId, htmlLink }
+    Backend-->>Vapi: { results: [{ toolCallId, result: "Successfully created..." }] }
+    Vapi->>LLM: Tool result
+    LLM->>Vapi: Confirmation message
+    Vapi->>User: 🤖 "Your meeting has been scheduled!"
+    Browser->>Backend: GET /api/session-events/:sessionId (on call-end)
+    Backend-->>Browser: { events: [{ title, startISO, timezone, htmlLink }] }
+    Browser->>User: 📅 Meeting card rendered in UI
+```
+
+---
+
+### 2. OAuth 2.0 Authentication Flow
+
+The agent uses Google OAuth 2.0 with **offline access** (refresh token) so events can be created server-side without requiring the user to be actively logged in each time.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Backend
+    participant Google as Google OAuth2
+
+    User->>Backend: GET /auth/google/start
+    Backend->>Backend: Generate UUID sessionId
+    Backend->>Backend: Build consent URL (state=sessionId, scope=calendar.events)
+    Backend->>User: 302 Redirect → Google consent screen
+    User->>Google: Grant calendar access
+    Google->>Backend: GET /auth/google/callback?code=...&state=sessionId
+    Backend->>Google: POST /token (exchange code → tokens)
+    Google-->>Backend: { access_token, refresh_token, expiry_date }
+    Backend->>Backend: Store ONLY refresh_token in SQLite (discard access_token)
+    Backend->>User: 302 Redirect → /session/:sessionId
+```
+
+**Key security decisions:**
+
+| Decision | Rationale |
+|---|---|
+| `prompt=consent` on every auth | Forces Google to always issue a `refresh_token`. Without it, returning users get no refresh token and cannot schedule events server-side. |
+| Store only `refresh_token` | Access tokens expire in 1 hour and are useless to store. refresh tokens are long-lived and let us call the API on demand. |
+| `state=sessionId` round-trip | Eliminates the need for server-side session storage before the callback. The UUID is self-contained in the OAuth state parameter. |
+| `scope=calendar.events` only | Principle of least privilege — we never request read access to existing events, contacts, or any other Google data. |
+| Token rotation listener | `client.on('tokens', ...)` — if Google issues a new `refresh_token` (rare but possible), it is immediately persisted to SQLite. |
+
+---
+
+### 3. Date & Time Parsing Pipeline
+
+Natural language date/time parsing is one of the hardest problems in scheduling. The pipeline went through several iterations before arriving at the current approach.
+
+#### 3.1 Why not let the LLM format dates?
+
+> GPT-4o-mini anchors relative expressions like "tomorrow" and "next week" to its **training data cutoff date** — not the current runtime date. This caused events to be created in 2023 instead of 2026.
+
+The solution: the LLM collects the user's **raw intent** ("tomorrow at 3 PM") and passes it verbatim to the backend. The backend resolves it against the real server clock.
+
+#### 3.2 The Timezone Problem
+
+`chrono-node` is a Node.js library with no timezone awareness — it always interprets times relative to the **process's local clock** (UTC on Railway). This caused an 11 PM request to create a 2 AM event for users in UTC+3 timezones.
+
+```mermaid
+flowchart LR
+    A["User says '11 PM'\nin Istanbul UTC+3"] --> B["LLM sends\ndate='tomorrow'\ntime='11 PM'\ntimezone='Europe/Istanbul'"]
+    B --> C["Backend receives args"]
+
+    subgraph old["❌ Old approach (broken)"]
+        C --> D["chrono.parseDate('tomorrow 11 PM')"]
+        D --> E["Parsed as 2026-03-03T23:00:00 UTC"]
+        E --> F["setZone('Europe/Istanbul')"]
+        F --> G["2026-03-04T02:00:00+03:00\n(3 hours off!)"]
+    end
+
+    subgraph new["✅ New approach (correct)"]
+        C --> H["Compute now in Istanbul:\n2026-03-02T01:24:00+03:00"]
+        H --> I["Build fake reference Date\nwith LOCAL components as UTC:\nnew Date(2026, 2, 2, 1, 24, 0)"]
+        I --> J["chrono.parseDate('tomorrow 11 PM', ref)"]
+        J --> K["Parsed as 2026-03-03T23:00:00\n(UTC fields = Istanbul wall clock)"]
+        K --> L["setZone('Europe/Istanbul',\n{ keepLocalTime: true })"]
+        L --> M["2026-03-03T23:00:00+03:00 ✓"]
+    end
+```
+
+#### 3.3 Full Parsing Pipeline (Code)
+
+```typescript
+// Step 1: Get current time in the user's timezone
+const nowInUserTz = DateTime.now().setZone(timezone);
+
+// Step 2: Build a "fake" JS Date whose UTC fields hold the user's
+//         local time components — this tricks chrono into using their clock
+const tzAwareRef = new Date(
+  nowInUserTz.year,
+  nowInUserTz.month - 1,  // JS months are 0-based
+  nowInUserTz.day,
+  nowInUserTz.hour,
+  nowInUserTz.minute,
+  nowInUserTz.second,
+);
+
+// Step 3: chrono-node NLP parse — supports "tomorrow", "3 PM", "next Friday", etc.
+const combined  = `${date} ${time}`;          // e.g. "tomorrow 11 PM"
+const parsedDate = chrono.parseDate(combined, tzAwareRef, { forwardDate: true });
+
+// Step 4: keepLocalTime: true — reinterpret UTC fields as local wall-clock time
+//         and apply the real timezone offset
+const startDt = DateTime.fromJSDate(parsedDate)
+  .setZone(timezone, { keepLocalTime: true }); // → 2026-03-03T23:00:00+03:00 ✓
+```
+
+#### 3.4 Accepted Date/Time Formats
+
+The backend accepts any human-readable input that `chrono-node` can understand:
+
+| User says | Parsed as (Istanbul, UTC+3) |
+|---|---|
+| `"today"`, `"3 PM"` | `2026-03-02T15:00:00+03:00` |
+| `"tomorrow"`, `"11 PM"` | `2026-03-03T23:00:00+03:00` |
+| `"next Monday"`, `"2:30pm"` | Next Monday at 14:30 local |
+| `"March 15"`, `"14:00"` | `2026-03-15T14:00:00+03:00` |
+| `"5th April"`, `"noon"` | `2026-04-05T12:00:00+03:00` |
+| `"2026-03-20"`, `"10:00"` | `2026-03-20T10:00:00+03:00` |
+
+---
+
+### 4. Request Validation Pipeline
+
+Every tool call from Vapi passes through a multi-stage validation pipeline before touching the Google API.
+
+```mermaid
+flowchart TD
+    A[Vapi POST /api/create-event] --> B{Unwrap Vapi\nenvelope}
+    B -->|isVapiEnvelope=true| C[Extract toolCallId\n+ args + call.metadata]
+    B -->|direct curl| D[Use req.body as-is]
+    C --> E[Merge: metadata fills\nmissing sessionId/timezone]
+    D --> E
+    E --> F{Zod schema\nvalidation}
+    F -->|fail| G[vapiReply: Validation failed —\nfield: reason]
+    F -->|pass| H{chrono-node\nNLP parse}
+    H -->|null| I[vapiReply: Could not parse\ndate/time from ...]
+    H -->|parsed| J{luxon setZone\nkeeepLocalTime}
+    J -->|invalid| K[vapiReply: Invalid timezone]
+    J -->|valid| L{Past-time\nguard}
+    L -->|in past| M[vapiReply: The requested time\nis in the past]
+    L -->|future| N[Google Calendar API]
+    N -->|success| O[Store in sessionEventStore\nvapiReply: Successfully created...]
+    N -->|GoogleApiError| P[vapiReply: err.message]
+    N -->|unknown error| Q[vapiReply: Internal server error]
+
+    style G fill:#7f1d1d,color:#fca5a5
+    style I fill:#7f1d1d,color:#fca5a5
+    style K fill:#7f1d1d,color:#fca5a5
+    style M fill:#7f1d1d,color:#fca5a5
+    style P fill:#7f1d1d,color:#fca5a5
+    style Q fill:#7f1d1d,color:#fca5a5
+    style O fill:#14532d,color:#86efac
+```
+
+---
+
+### 5. Vapi Tool Call Protocol
+
+Vapi does not call the backend with a plain JSON body. It wraps the call in an **envelope format** that must be unwrapped before validation.
+
+#### 5.1 Incoming Vapi Envelope
+
+```json
+{
+  "message": {
+    "type": "tool-calls",
+    "toolCallList": [
+      {
+        "id": "call_abc123",
+        "function": {
+          "name": "create-event",
+          "arguments": {
+            "name":         "Jacob",
+            "date":         "tomorrow",
+            "time":         "11 PM",
+            "durationMins": 30,
+            "title":        "Big Project"
+          }
+        }
+      }
+    ],
+    "call": {
+      "metadata": {
+        "sessionId": "uuid-v4-from-oauth",
+        "timezone":  "Europe/Istanbul"
+      }
+    }
+  }
+}
+```
+
+#### 5.2 Required Response Format
+
+Vapi requires `HTTP 200` with this exact shape. Any other status code causes the LLM to receive "No result returned":
+
+```json
+{
+  "results": [
+    {
+      "toolCallId": "call_abc123",
+      "result":     "Successfully created \"Big Project\" on 2026-03-03T23:00:00 (Europe/Istanbul)."
+    }
+  ]
+}
+```
+
+#### 5.3 Metadata Injection
+
+Context is passed from the browser session to Vapi to the tool call automatically:
+
+```mermaid
+flowchart LR
+    A["Browser detects\nIANA timezone\n(Intl.DateTimeFormat)"] --> B["vapi.start(assistantId, {\n  metadata: { sessionId, timezone,\n             nowISO, todayISO },\n  variableValues: { same }\n})"]
+    B --> C["Vapi injects into\nsystem prompt:\n{{sessionId}}, {{timezone}}\n{{todayISO}}, {{nowISO}}"]
+    C --> D["LLM reads context\nknows today's date\nknows user's timezone"]
+    D --> E["Tool call includes\nargs.sessionId + args.timezone\nOR call.metadata.sessionId\n+ call.metadata.timezone"]
+    E --> F["Backend merges both\nsources (args win)"]
+```
+
+> **Note:** Vapi does NOT substitute `{{metadata.key}}` from `variableValues` — dotted keys are silently ignored. Use plain keys (`{{sessionId}}`, `{{timezone}}`) and pass them as top-level `variableValues` entries.
+
+---
+
+### 6. Google Calendar API Integration
+
+#### 6.1 Event Payload
+
+The Google Calendar API receives a fully-qualified RFC 3339 datetime with an explicit IANA timezone. Google handles all DST transitions correctly:
+
+```json
+{
+  "summary":     "Big Project",
+  "description": "Scheduled for Jacob",
+  "start": {
+    "dateTime": "2026-03-03T23:00:00",
+    "timeZone": "Europe/Istanbul"
+  },
+  "end": {
+    "dateTime": "2026-03-03T23:30:00",
+    "timeZone": "Europe/Istanbul"
+  }
+}
+```
+
+#### 6.2 Token Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoSession: User visits the app
+    NoSession --> OAuthConsent: GET /auth/google/start
+    OAuthConsent --> TokenStored: User grants access\nRefresh token saved to SQLite
+    TokenStored --> BuildClient: Tool call received\nbuildAuthorisedClient(sessionId)
+    BuildClient --> CallSucceeds: googleapis auto-refreshes\naccess token using refresh token
+    CallSucceeds --> TokenStored: Token rotation listener\npersists new refresh token if issued
+    BuildClient --> ReAuthRequired: refresh token revoked\nor expired (invalid_grant)
+    ReAuthRequired --> OAuthConsent: User must re-authenticate
+```
+
+#### 6.3 Error Mapping
+
+Raw Google API errors are mapped to meaningful HTTP status codes and user-friendly messages:
+
+| Google Error | Mapped Status | Message to LLM |
+|---|---|---|
+| `invalid_grant` | `401` | "Google authorisation expired. Please reconnect…" |
+| `insufficientPermissions` | `403` | "Insufficient calendar permissions. Please reconnect…" |
+| `quotaExceeded` / `rateLimitExceeded` | `429` | "Rate limit exceeded. Please try again shortly." |
+| Any other Google error | `502` | "Google Calendar API error: {original message}" |
+| Unknown server error | `500` | "Internal server error. Please try again." |
+
+---
+
+### 7. Audit Logging
+
+Every scheduling attempt — successful or not — is written to `logs/calendar-audit.jsonl` as an append-only newline-delimited JSON file. This provides a complete audit trail for debugging and compliance.
+
+#### 7.1 Audit Entry Lifecycle
+
+```mermaid
+flowchart LR
+    A["Request received"] -->|immediately| B["stage: received\nwritten FIRST"]
+    B --> C{Validation}
+    C -->|fail| D["stage: validation_error\n+ errorMessage\n+ fieldErrors"]
+    C -->|pass| E{Past-time check}
+    E -->|fail| F["stage: past_time\n+ parsedStartISO\n+ errorMessage"]
+    E -->|pass| G{Google API}
+    G -->|success| H["stage: google_success\n+ eventId\n+ htmlLink\n+ googlePayload"]
+    G -->|fail| I["stage: google_error\n+ googleStatus\n+ errorMessage"]
+```
+
+#### 7.2 Sample Audit Entries
+
+**Successful event creation:**
+```json
+{
+  "timestamp":      "2026-03-02T10:15:32.000Z",
+  "requestId":      "f1a2b3c4-...",
+  "sessionIdHash":  "a1b2c3d4e5f6",
+  "stage":          "google_success",
+  "input": {
+    "date":         "tomorrow",
+    "time":         "11 PM",
+    "timezone":     "Europe/Istanbul",
+    "durationMins": 30,
+    "name":         "Jacob",
+    "title":        "Big Project"
+  },
+  "parsedStartISO": "2026-03-03T23:00:00",
+  "parsedEndISO":   "2026-03-03T23:30:00",
+  "timezone":       "Europe/Istanbul",
+  "googlePayload": {
+    "summary": "Big Project",
+    "start":   { "dateTime": "2026-03-03T23:00:00", "timeZone": "Europe/Istanbul" },
+    "end":     { "dateTime": "2026-03-03T23:30:00", "timeZone": "Europe/Istanbul" }
+  },
+  "eventId":  "abc123xyz",
+  "htmlLink": "https://www.google.com/calendar/event?eid=..."
+}
+```
+
+**Validation failure:**
+```json
+{
+  "timestamp":     "2026-03-02T10:12:00.000Z",
+  "requestId":     "d4e5f6a7-...",
+  "sessionIdHash": "--",
+  "stage":         "validation_error",
+  "errorMessage":  "sessionId: sessionId must be a valid UUID"
+}
+```
+
+> **Security:** `sessionIdHash` is a truncated SHA-256 of the raw UUID — never the raw UUID itself. Access tokens, refresh tokens, and client secrets are redacted by pino before any log line is written.
+
+---
+
+### 8. Session Event Store (UI ↔ Backend Bridge)
+
+After a call ends, the browser needs to display what meetings were created. Since we can't reliably intercept Vapi's internal tool result messages on the client, the backend maintains a per-session in-memory event store.
+
+```mermaid
+flowchart TD
+    A["Google Calendar API\nreturns { eventId, htmlLink }"] --> B["storeSessionEvent(sessionId, {\n  title, startISO, timezone, htmlLink\n})"]
+    B --> C["sessionEventStore Map\nsessionId → SessionEvent[]"]
+    D["vapi call-end event\nin browser"] --> E["fetch('/api/session-events/:sessionId')"]
+    E --> F["GET /api/session-events/:sessionId\nRoute handler"]
+    F --> C
+    C --> F
+    F --> E
+    E --> G["Render meeting cards\nwith real Google Calendar links"]
+```
+
+**Why in-memory rather than SQLite?**
+The event store is intentionally ephemeral — it only needs to survive a single browser session. Using SQLite would add write overhead and schema complexity for data that has zero long-term value. If the server restarts mid-call, the UI simply shows no cards (the event still exists in Google Calendar).
+
+---
+
 ## Troubleshooting
 
 | Problem | Cause | Fix |
@@ -340,3 +732,4 @@ Token values never appear in logs. Sensitive fields are redacted by pino: `acces
 | SQLite errors on Railway | Volume not attached | Create volume in Railway dashboard, mount at `/data`, set `DB_PATH=/data/tokens.db` |
 | Rate limit hit on `/auth` | Too many OAuth attempts | Wait 15 minutes |
 | `durationMins` clamped unexpectedly | Value outside 5–240 range | Ensure Vapi passes a value between 5 and 240 |
+| Meeting card not appearing | Call ended too quickly before fetch | Re-open the session URL and check Google Calendar directly |

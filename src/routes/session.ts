@@ -61,127 +61,334 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Voice Scheduling Agent</title>
   <style>
-    body { font-family: system-ui, sans-serif; display: flex; flex-direction: column;
-           align-items: center; justify-content: center; min-height: 100vh;
-           margin: 0; background: #f5f5f5; }
-    .card { background: white; border-radius: 12px; padding: 2rem 3rem;
-            box-shadow: 0 2px 16px rgba(0,0,0,0.1); text-align: center; max-width: 400px; }
-    h1 { font-size: 1.4rem; margin-bottom: 0.5rem; }
-    p  { color: #666; margin-bottom: 1.5rem; font-size: 0.95rem; }
-    button { background: #2563eb; color: white; border: none; border-radius: 8px;
-             padding: 0.75rem 2rem; font-size: 1rem; cursor: pointer; }
-    button:hover { background: #1d4ed8; }
-    button:disabled { background: #93c5fd; cursor: not-allowed; }
-    #status { margin-top: 1rem; font-size: 0.85rem; color: #555; min-height: 1.2em; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f172a; color: #e2e8f0;
+      height: 100dvh; display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: #1e293b; padding: 0.85rem 1.25rem;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid #334155;
+    }
+    .header h1 { font-size: 0.95rem; font-weight: 600; color: #f1f5f9; }
+    .status-badge { display: flex; align-items: center; gap: 0.5rem; font-size: 0.78rem; color: #94a3b8; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #475569; transition: background .3s; }
+    .status-dot.active { background: #22c55e; animation: statusPulse 1.5s infinite; }
+    @keyframes statusPulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* ── Speaking bar ── */
+    .speaking-bar {
+      background: #162032; padding: 0.45rem 1.25rem;
+      display: none; align-items: center; gap: 0.65rem;
+      font-size: 0.78rem; color: #94a3b8;
+      border-bottom: 1px solid #1e3a5f;
+      min-height: 32px;
+    }
+    .speaking-bar.visible { display: flex; }
+    .waves { display: flex; gap: 3px; align-items: center; height: 18px; }
+    .waves span {
+      display: block; width: 3px; border-radius: 3px;
+      animation: wave .85s ease-in-out infinite;
+    }
+    .waves span:nth-child(1){height:5px;animation-delay:0s}
+    .waves span:nth-child(2){height:11px;animation-delay:.1s}
+    .waves span:nth-child(3){height:16px;animation-delay:.2s}
+    .waves span:nth-child(4){height:9px;animation-delay:.3s}
+    .waves span:nth-child(5){height:5px;animation-delay:.4s}
+    @keyframes wave { 0%,100%{transform:scaleY(.4)} 50%{transform:scaleY(1)} }
+    .waves.user span { background: #3b82f6; }
+    .waves.assistant span { background: #a855f7; }
+
+    /* ── Main layout ── */
+    .main { display: grid; grid-template-columns: 1fr 300px; overflow: hidden; }
+    @media (max-width: 600px) {
+      .main { grid-template-columns: 1fr; grid-template-rows: 1fr 180px; }
+      .meetings-panel { border-left: none; border-top: 1px solid #334155; }
+    }
+
+    /* ── Transcript ── */
+    .transcript-panel { padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.65rem; }
+    .transcript-empty { color: #334155; font-size: 0.83rem; text-align: center; margin-top: 3rem; user-select: none; }
+    .msg { display: flex; flex-direction: column; gap: 0.2rem; animation: fadeUp .2s ease; }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
+    .msg-role { font-size: 0.68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .msg-role.user { color: #60a5fa; }
+    .msg-role.assistant { color: #c084fc; }
+    .msg-text {
+      padding: .55rem .85rem; border-radius: 10px;
+      font-size: 0.88rem; line-height: 1.5; max-width: 88%;
+    }
+    .msg.user  .msg-text { align-self: flex-end; background: #1e3a5f; border-bottom-right-radius: 3px; }
+    .msg.assistant .msg-text { align-self: flex-start; background: #2d1b4e; border-bottom-left-radius: 3px; }
+    .msg.partial .msg-text { opacity: .55; }
+
+    /* ── Meetings panel ── */
+    .meetings-panel {
+      background: #1a2744; border-left: 1px solid #334155;
+      padding: 1rem; overflow-y: auto;
+      display: flex; flex-direction: column; gap: .65rem;
+    }
+    .meetings-panel h2 { font-size: .72rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: .07em; margin-bottom: .15rem; }
+    .meetings-empty { color: #334155; font-size: .8rem; }
+
+    /* ── Meeting card ── */
+    .meeting-card {
+      background: linear-gradient(135deg,#052e16,#0f3d2e);
+      border: 1px solid #16a34a; border-radius: 10px;
+      padding: .85rem; animation: slideIn .45s cubic-bezier(.34,1.56,.64,1);
+    }
+    @keyframes slideIn { from{opacity:0;transform:translateX(18px) scale(.95)} to{opacity:1;transform:none} }
+    .mc-badge { font-size: .85rem; margin-bottom: .35rem; }
+    .mc-title { font-weight: 700; font-size: .9rem; color: #f0fdf4; margin-bottom: .45rem; word-break: break-word; }
+    .mc-row { font-size: .75rem; color: #86efac; margin-bottom: .18rem; display: flex; align-items: flex-start; gap: .35rem; }
+    .mc-icon { flex-shrink: 0; }
+    .mc-link {
+      display: inline-flex; align-items: center; gap: .4rem;
+      margin-top: .6rem; font-size: .75rem;
+      background: #16a34a; color: white;
+      padding: .32rem .7rem; border-radius: 6px;
+      text-decoration: none; font-weight: 600;
+      transition: background .2s;
+    }
+    .mc-link:hover { background: #15803d; }
+
+    /* ── Bottom bar ── */
+    .bottom-bar {
+      background: #1e293b; border-top: 1px solid #334155;
+      padding: .85rem 1.25rem; display: flex;
+      align-items: center; justify-content: center; gap: .85rem;
+    }
+    .btn-start {
+      background: #2563eb; color: #fff; border: none; border-radius: 50px;
+      padding: .7rem 2.2rem; font-size: .95rem; cursor: pointer; font-weight: 600;
+      transition: background .2s, transform .1s;
+    }
+    .btn-start:hover { background: #1d4ed8; }
+    .btn-start:active { transform: scale(.97); }
+    .btn-start:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+    .btn-end {
+      background: #dc2626; color: #fff; border: none; border-radius: 50px;
+      padding: .7rem 1.8rem; font-size: .9rem; cursor: pointer; font-weight: 600;
+      display: none; transition: background .2s;
+    }
+    .btn-end.visible { display: block; }
+    .btn-end:hover { background: #b91c1c; }
+    .bottom-hint { font-size: .78rem; color: #475569; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Schedule with Voice</h1>
-    <p>Click below to speak with your AI scheduling assistant.</p>
-    <button id="startBtn">Start Voice Call</button>
-    <div id="status"></div>
+
+  <header class="header">
+    <h1>🗓 Voice Scheduling Agent</h1>
+    <div class="status-badge">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Ready</span>
+    </div>
+  </header>
+
+  <div class="speaking-bar" id="speakingBar">
+    <div class="waves" id="speakingWaves">
+      <span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <span id="speakingLabel">Speaking…</span>
   </div>
 
-  <!--
-    Vapi Web SDK loaded via ESM from esm.sh — no CDN domain required.
-    type="module" defers automatically and scopes all variables locally,
-    so the event listener is wired inside the module rather than via onclick.
-  -->
+  <div class="main">
+    <div class="transcript-panel" id="transcriptPanel">
+      <div class="transcript-empty" id="transcriptEmpty">Conversation will appear here once you start the call.</div>
+    </div>
+
+    <div class="meetings-panel">
+      <h2>📅 Scheduled Meetings</h2>
+      <p class="meetings-empty" id="meetingsEmpty">No meetings yet.</p>
+      <div id="meetingsList"></div>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <button class="btn-start" id="startBtn">🎙 Start Voice Call</button>
+    <button class="btn-end"   id="endBtn">⏹ End Call</button>
+    <span class="bottom-hint" id="bottomHint"></span>
+  </div>
+
   <script type="module">
     import Vapi from "https://esm.sh/@vapi-ai/web@2.5.2";
 
-    // Server-injected values
     const PUBLIC_KEY   = "${safePublicKey}";
     const ASSISTANT_ID = "${safeAssistantId}";
     const SESSION_ID   = "${safeSessionId}";
 
-    const btn    = document.getElementById('startBtn');
-    const status = document.getElementById('status');
+    const startBtn       = document.getElementById('startBtn');
+    const endBtn         = document.getElementById('endBtn');
+    const statusDot      = document.getElementById('statusDot');
+    const statusText     = document.getElementById('statusText');
+    const speakingBar    = document.getElementById('speakingBar');
+    const speakingWaves  = document.getElementById('speakingWaves');
+    const speakingLabel  = document.getElementById('speakingLabel');
+    const transcriptPanel= document.getElementById('transcriptPanel');
+    const transcriptEmpty= document.getElementById('transcriptEmpty');
+    const meetingsList   = document.getElementById('meetingsList');
+    const meetingsEmpty  = document.getElementById('meetingsEmpty');
+    const bottomHint     = document.getElementById('bottomHint');
 
     const vapi = new Vapi(PUBLIC_KEY);
 
-    vapi.on('call-start', () => {
-      status.textContent = 'Call started \u2014 speak now!';
-    });
-    vapi.on('call-end', () => {
-      status.textContent = 'Call ended.';
-      btn.disabled = false;
-    });
-    vapi.on('error', (e) => {
-      status.textContent = 'Connection error. Please refresh and try again.';
-      btn.disabled = false;
-      // Stringify fully so the validation-error detail is visible in console
-      console.error('[vapi] error event:', JSON.stringify(e, Object.getOwnPropertyNames(e)));
-    });
+    // ── Transcript helpers ────────────────────────────────────────────
+    let partialEl   = null;
+    let partialRole = null;
 
-    btn.addEventListener('click', async () => {
-      btn.disabled       = true;
-      status.textContent = 'Connecting\u2026';
+    function showMsg(role, text, isPartial) {
+      if (transcriptEmpty) transcriptEmpty.style.display = 'none';
 
+      if (isPartial) {
+        if (!partialEl || partialRole !== role) {
+          commitPartial();
+          partialEl   = makeMsgEl(role, text, true);
+          partialRole = role;
+          transcriptPanel.appendChild(partialEl);
+        } else {
+          partialEl.querySelector('.msg-text').textContent = text;
+        }
+      } else {
+        if (partialEl && partialRole === role) {
+          partialEl.querySelector('.msg-text').textContent = text;
+          partialEl.classList.remove('partial');
+          partialEl = null; partialRole = null;
+        } else {
+          commitPartial();
+          transcriptPanel.appendChild(makeMsgEl(role, text, false));
+        }
+      }
+      transcriptPanel.scrollTop = transcriptPanel.scrollHeight;
+    }
+
+    function commitPartial() {
+      if (partialEl) { partialEl.classList.remove('partial'); partialEl = null; partialRole = null; }
+    }
+
+    function makeMsgEl(role, text, isPartial) {
+      const d = document.createElement('div');
+      d.className = 'msg ' + role + (isPartial ? ' partial' : '');
+      const label = role === 'user' ? '🎙 You' : '🤖 Assistant';
+      d.innerHTML = '<div class="msg-role ' + role + '">' + label + '</div><div class="msg-text"></div>';
+      d.querySelector('.msg-text').textContent = text;
+      return d;
+    }
+
+    // ── Speaking indicator ────────────────────────────────────────────
+    function setSpeaking(role) {
+      if (!role) { speakingBar.classList.remove('visible'); return; }
+      speakingBar.classList.add('visible');
+      speakingWaves.className = 'waves ' + role;
+      speakingLabel.textContent = role === 'user' ? 'You are speaking…' : 'Assistant is speaking…';
+    }
+
+    // ── Meeting card ─────────────────────────────────────────────────
+    function tryAddMeeting(resultStr) {
+      // Parse: Successfully created "TITLE" on 2026-03-03T23:00:00 (TIMEZONE).
+      const m = resultStr.match(/Successfully created "([^"]+)" on ([0-9T:\\-]+) \\(([^)]+)\\)/);
+      if (!m) return;
+      const [, title, startISO, timezone] = m;
+
+      meetingsEmpty.style.display = 'none';
+
+      // Format datetime from ISO without Date() to avoid TZ ambiguity
+      const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      let displayDt = startISO;
       try {
-        // --- Temporal context ---
-        // timezone: IANA name from the browser (e.g. "Europe/Istanbul")
-        // nowISO:   UTC instant — used by the assistant for current-time awareness
-        // todayISO: local calendar date YYYY-MM-DD in the user's timezone.
-        //           The sv-SE locale formats dates as YYYY-MM-DD natively,
-        //           avoiding manual string concatenation.
-        //
-        // These are passed in BOTH metadata (accessible via {{call.metadata.*}}
-        // in the Vapi system prompt) AND variableValues (accessible via {{*}}
-        // directly in the prompt template).
-        //
-        // Recommended system-prompt addition in the Vapi dashboard:
-        //   "Today's date is {{todayISO}}. Current UTC time is {{nowISO}}.
-        //    The user's timezone is {{timezone}}.
-        //    You MUST use these values to resolve relative dates like 'today'
-        //    or 'tomorrow'. Always output date as YYYY-MM-DD and time as HH:mm
-        //    (24-hour) when calling the create-event tool."
+        const [dp, tp] = startISO.split('T');
+        const [yr, mo, dy] = dp.split('-').map(Number);
+        const [hr, mn]     = tp.split(':').map(Number);
+        const ampm  = hr >= 12 ? 'PM' : 'AM';
+        const hr12  = hr % 12 || 12;
+        displayDt   = MONTHS[mo-1] + ' ' + dy + ', ' + yr + ' — ' + hr12 + ':' + String(mn).padStart(2,'0') + ' ' + ampm;
+      } catch (_) {}
 
-        const timezone  = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        const nowISO    = new Date().toISOString();
-        const todayISO  = new Intl.DateTimeFormat('sv-SE', { timeZone: timezone }).format(new Date());
+      const card = document.createElement('div');
+      card.className = 'meeting-card';
+      card.innerHTML =
+        '<div class="mc-badge">✅ Created</div>' +
+        '<div class="mc-title">' + esc(title) + '</div>' +
+        '<div class="mc-row"><span class="mc-icon">🕐</span><span>' + esc(displayDt) + '</span></div>' +
+        '<div class="mc-row"><span class="mc-icon">🌍</span><span>' + esc(timezone) + '</span></div>' +
+        '<a class="mc-link" href="https://calendar.google.com" target="_blank" rel="noopener">📅 Open Google Calendar</a>';
 
-        console.log('[vapi] temporal context →', { timezone, nowISO, todayISO });
+      meetingsList.prepend(card);
+    }
 
-        // ---------------------------------------------------------------
-        // Vapi template resolution:
-        //
-        // Vapi replaces {{token}} in the system prompt using the
-        // variableValues map, where the key must match the token text EXACTLY.
-        //
-        // IMPORTANT: Vapi intercepts the "metadata" namespace internally.
-        // Dotted keys like "metadata.todayISO" in variableValues are NOT
-        // substituted into {{metadata.todayISO}} template tokens — they are
-        // silently ignored.
-        //
-        // The system prompt MUST use plain tokens: {{sessionId}}, {{timezone}},
-        // {{todayISO}}, {{nowISO}}.  The plain keys below resolve those tokens.
-        // ---------------------------------------------------------------
-        await vapi.start(ASSISTANT_ID, {
-          metadata: {
-            sessionId: SESSION_ID,
-            timezone,
-            nowISO,
-            todayISO,
-          },
-          variableValues: {
-            // Plain keys — the system prompt MUST use {{sessionId}}, {{timezone}},
-            // {{todayISO}}, {{nowISO}} for these to be substituted correctly.
-            sessionId: SESSION_ID,
-            timezone,
-            nowISO,
-            todayISO,
-          },
-        });
-      } catch (e) {
-        // Log the full error so the browser console shows the real cause
-        console.error('[vapi] start() threw:', JSON.stringify(e, Object.getOwnPropertyNames(e)));
-        status.textContent = 'Failed to start voice call. Please refresh and try again.';
-        btn.disabled = false;
-        console.error('Vapi init error:', e);
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ── Vapi events ───────────────────────────────────────────────────
+    vapi.on('call-start', () => {
+      statusDot.classList.add('active');
+      statusText.textContent = 'Connected';
+      bottomHint.textContent = '';
+      endBtn.classList.add('visible');
+      startBtn.style.display = 'none';
+    });
+
+    vapi.on('call-end', () => {
+      statusDot.classList.remove('active');
+      statusText.textContent = 'Call ended';
+      setSpeaking(null);
+      commitPartial();
+      endBtn.classList.remove('visible');
+      startBtn.style.display = '';
+      startBtn.disabled = false;
+      bottomHint.textContent = 'Call ended. You can start a new call anytime.';
+    });
+
+    vapi.on('speech-end', () => setSpeaking(null));
+
+    vapi.on('message', (msg) => {
+      if (msg.type === 'transcript') {
+        const { role, transcriptType, transcript } = msg;
+        setSpeaking(role);
+        showMsg(role, transcript, transcriptType === 'partial');
+        if (transcriptType === 'final') setSpeaking(null);
+      } else if (msg.type === 'tool-call-result') {
+        tryAddMeeting(msg.result ?? '');
       }
     });
+
+    vapi.on('error', (e) => {
+      statusText.textContent = 'Error';
+      startBtn.disabled = false;
+      bottomHint.textContent = 'Connection error — please refresh.';
+      console.error('[vapi] error:', JSON.stringify(e, Object.getOwnPropertyNames(e)));
+    });
+
+    // ── Button handlers ───────────────────────────────────────────────
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled      = true;
+      statusText.textContent = 'Connecting…';
+
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const nowISO   = new Date().toISOString();
+      const todayISO = new Intl.DateTimeFormat('sv-SE', { timeZone: timezone }).format(new Date());
+
+      try {
+        await vapi.start(ASSISTANT_ID, {
+          metadata:       { sessionId: SESSION_ID, timezone, nowISO, todayISO },
+          variableValues: { sessionId: SESSION_ID, timezone, nowISO, todayISO },
+        });
+      } catch (e) {
+        console.error('[vapi] start() threw:', JSON.stringify(e, Object.getOwnPropertyNames(e)));
+        statusText.textContent = 'Failed to connect';
+        startBtn.disabled = false;
+        bottomHint.textContent = 'Failed to start. Please refresh.';
+      }
+    });
+
+    endBtn.addEventListener('click', () => vapi.stop());
   </script>
 </body>
 </html>`;

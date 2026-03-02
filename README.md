@@ -4,6 +4,55 @@ A production-grade real-time voice scheduling agent built with Vapi, GPT-4o-mini
 
 ---
 
+## 🚀 Deployed URL
+
+**Live:** https://voice-scheduling-agent.up.railway.app
+
+---
+
+## 🧪 How to Test the Agent
+
+### Option 1 — Use the live deployment (recommended)
+
+1. Open **https://voice-scheduling-agent.up.railway.app**
+2. Click **"Start Voice Scheduling"** on the landing page
+3. Complete the Google OAuth consent screen (grant Calendar access)
+4. You will be redirected to the voice call page automatically
+5. Click **"🎙 Start Voice Call"**
+6. Speak naturally — example conversation:
+   > *"Hi, my name is Alex. I'd like to schedule a meeting tomorrow at 3 PM for 30 minutes. The title is Project Review."*
+7. The assistant will confirm the details and create the event
+8. After the call ends, a **meeting card** appears in the right panel with a direct link to the Google Calendar event
+9. Check your Google Calendar — the event will be there
+
+### Option 2 — Run locally
+
+```bash
+git clone https://github.com/yakupzengin/voice-scheduling-agent
+cd voice-scheduling-agent
+npm install
+cp .env.example .env
+# Fill in .env with your own Google OAuth + Vapi credentials
+npm run dev
+# Open http://localhost:3000
+```
+
+---
+
+## 📸 Screenshots & Demo
+
+### Railway Deployment — Live Production
+
+![Railway Deployment](railway-deployment.png)
+
+### Demo Video — Full Flow (OAuth → Voice Call → Event Created)
+
+> The video below shows the complete flow: Google OAuth authentication, voice conversation with the assistant, Google Calendar event creation, and the meeting card appearing in the UI.
+
+![Demo](demo-video.mp4)
+
+---
+
 ## Architecture
 
 ```mermaid

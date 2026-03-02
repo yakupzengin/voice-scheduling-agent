@@ -47,7 +47,9 @@ npm run dev
 
 ### Demo Video — Full Flow (OAuth → Voice Call → Event Created)
 
-> The video below shows the complete flow: Google OAuth authentication, voice conversation with the assistant, Google Calendar event creation, and the meeting card appearing in the UI.
+▶️ **[Watch on YouTube](https://youtu.be/hvvtOpy2wkU)**
+
+The video shows the complete flow: Google OAuth authentication, voice conversation with the assistant, Google Calendar event creation, and the meeting card appearing in the UI.
 
 ![Demo](demo-video.mp4)
 

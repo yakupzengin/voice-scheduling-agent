@@ -372,11 +372,6 @@ function buildSessionPage(sessionId: string, publicKey: string, assistantId: str
     vapi.on('speech-end', () => setSpeaking(null));
 
     vapi.on('message', (msg) => {
-      // Log every non-transcript message for debugging
-      if (msg.type !== 'transcript') {
-        console.log('[vapi] message:', msg.type, JSON.stringify(msg).slice(0, 300));
-      }
-
       if (msg.type === 'transcript') {
         const { role, transcriptType, transcript } = msg;
         setSpeaking(role);

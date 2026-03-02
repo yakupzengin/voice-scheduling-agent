@@ -120,12 +120,6 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
     rawBody:       req.body,
   });
 
-  // --- 1. Log raw request (full body — critical for debugging Vapi envelope) ---
-  console.log('===== TOOL REQUEST RECEIVED =====');
-  console.log('Headers:', JSON.stringify(req.headers, null, 2));
-  console.log('Raw Body:', JSON.stringify(req.body, null, 2));
-  console.log('=================================');
-
   // ---------------------------------------------------------------------------
   // --- 2. Unwrap Vapi webhook envelope ---
   //
@@ -309,9 +303,7 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
   const startISO = startDt.toFormat("yyyy-MM-dd'T'HH:mm:ss");
   const endISO   = startDt.plus({ minutes: durationMins }).toFormat("yyyy-MM-dd'T'HH:mm:ss");
 
-  console.log(`[create-event] parsed → startISO=${startISO}  endISO=${endISO}  zone=${timezone}`);
-
-  // --- 4. Past-date guard ---
+  // --- 5. Build Google payload ---
   if (startDt <= DateTime.now().setZone(timezone)) {
     const msg =
       `The requested time ${startISO} (${timezone}) is in the past. ` +
@@ -348,10 +340,6 @@ calendarRouter.post('/create-event', async (req: Request, res: Response) => {
     start:   { dateTime: startISO, timeZone: timezone },
     end:     { dateTime: endISO,   timeZone: timezone },
   };
-
-  console.log('===== GOOGLE EVENT INPUT =====');
-  console.log(googlePayload);
-  console.log('================================');
 
   // --- 6. Create event via Google Calendar ---
   try {

@@ -51,7 +51,6 @@ npm run dev
 
 The video shows the complete flow: Google OAuth authentication, voice conversation with the assistant, Google Calendar event creation, and the meeting card appearing in the UI.
 
-![Demo](demo-video.mp4)
 
 ---
 
